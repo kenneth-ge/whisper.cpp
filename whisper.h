@@ -71,30 +71,23 @@ extern "C" {
 
     typedef int whisper_token;
 
-    typedef struct whisper_token_data {
-        whisper_token id;  // token id
-        whisper_token tid; // forced timestamp token id
+    struct whisper_token_data; // opaque to users of this module
+    struct whisper_model_loader; // opaque to users of this module
 
-        float p;           // probability of the token
-        float plog;        // log probability of the token
-        float pt;          // probability of the timestamp token
-        float ptsum;       // sum of probabilities of all timestamp tokens
+    /*** Constructor, getters and setters for two structs above ***/
+    whisper_model_loader* whisper_model_loader__new(void * context, size_t (*read)(void *, void *, size_t), bool (*eof)(void *), void (*close)(void *));
 
-        // token-level timestamp data
-        // do not use if you haven't computed token-level timestamps
-        int64_t t0;        // start time of the token
-        int64_t t1;        //   end time of the token
+    whisper_token whisper_token_data__get_id(whisper_token_data* token_data);
+    whisper_token whisper_token_data__get_tid(whisper_token_data* token_data);
+    float whisper_token_data__get_p(whisper_token_data* token_data);
+    float whisper_token_data__get_plog(whisper_token_data* token_data);
+    float whisper_token_data__get_pt(whisper_token_data* token_data);
+    float whisper_token_data__get_ptsum(whisper_token_data* token_data);
+    int64_t whisper_token_data__get_t0(whisper_token_data* token_data);
+    int64_t whisper_token_data__get_t1(whisper_token_data* token_data);
+    float whisper_token_data__get_vlen(whisper_token_data* token_data);
 
-        float vlen;        // voice length of the token
-    } whisper_token_data;
-
-    typedef struct whisper_model_loader {
-        void * context;
-
-        size_t (*read)(void * ctx, void * output, size_t read_size);
-        bool    (*eof)(void * ctx);
-        void  (*close)(void * ctx);
-    } whisper_model_loader;
+    /*************************************************/
 
     // Various functions for loading a ggml whisper model.
     // Allocate (almost) all memory needed for the model.
@@ -503,8 +496,8 @@ extern "C" {
 
     // Get token data for the specified token in the specified segment
     // This contains probabilities, timestamps, etc.
-    WHISPER_API whisper_token_data whisper_full_get_token_data           (struct whisper_context * ctx, int i_segment, int i_token);
-    WHISPER_API whisper_token_data whisper_full_get_token_data_from_state(struct whisper_state * state, int i_segment, int i_token);
+    WHISPER_API whisper_token_data* whisper_full_get_token_data           (struct whisper_context * ctx, int i_segment, int i_token);
+    WHISPER_API whisper_token_data* whisper_full_get_token_data_from_state(struct whisper_state * state, int i_segment, int i_token);
 
     // Get the probability of the specified token in the specified segment
     WHISPER_API float whisper_full_get_token_p           (struct whisper_context * ctx, int i_segment, int i_token);

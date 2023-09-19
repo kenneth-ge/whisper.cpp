@@ -355,6 +355,74 @@ static const std::map<ggml_type, std::map<e_model, size_t>> MEM_REQ_MODEL = {
     },
 };
 
+/** Move whisper_token_data and whisper_model_loader to whisper.cpp to make them private **/
+struct whisper_token_data {
+    whisper_token id;  // token id
+    whisper_token tid; // forced timestamp token id
+
+    float p;           // probability of the token
+    float plog;        // log probability of the token
+    float pt;          // probability of the timestamp token
+    float ptsum;       // sum of probabilities of all timestamp tokens
+
+    // token-level timestamp data
+    // do not use if you haven't computed token-level timestamps
+    int64_t t0;        // start time of the token
+    int64_t t1;        //   end time of the token
+
+    float vlen;        // voice length of the token
+};
+
+struct whisper_model_loader {
+    void * context;
+
+    size_t (*read)(void * ctx, void * output, size_t read_size);
+    bool    (*eof)(void * ctx);
+    void  (*close)(void * ctx);
+};
+
+whisper_model_loader* whisper_model_loader__new(void * context, size_t (*read)(void *, void *, size_t), bool (*eof)(void *), void (*close)(void *)){
+    return new whisper_model_loader{context, read, eof, close};
+}
+
+whisper_token whisper_token_data__get_id(whisper_token_data* token_data){
+    return token_data->id;
+}
+
+whisper_token whisper_token_data__get_tid(whisper_token_data* token_data){
+    return token_data->tid;
+}
+
+float whisper_token_data__get_p(whisper_token_data* token_data){
+    return token_data->p;
+}
+
+float whisper_token_data__get_plog(whisper_token_data* token_data){
+    return token_data->plog;
+}
+
+float whisper_token_data__get_pt(whisper_token_data* token_data){
+    return token_data->pt;
+}
+
+float whisper_token_data__get_ptsum(whisper_token_data* token_data){
+    return token_data->ptsum;
+}
+
+int64_t whisper_token_data__get_t0(whisper_token_data* token_data){
+    return token_data->t0;
+}
+
+int64_t whisper_token_data__get_t1(whisper_token_data* token_data){
+    return token_data->t1;
+}
+
+float whisper_token_data__get_vlen(whisper_token_data* token_data){
+    return token_data->vlen;
+}
+
+/**********************************************************************************/
+
 struct whisper_mel {
     int n_len;
     int n_len_org;
@@ -403,7 +471,7 @@ struct whisper_segment {
 
     std::string text;
 
-    std::vector<whisper_token_data> tokens;
+    std::vector<whisper_token_data*> tokens;
 
     bool speaker_turn_next;
 };
@@ -583,7 +651,7 @@ struct whisper_model {
 };
 
 struct whisper_sequence {
-    std::vector<whisper_token_data> tokens;
+    std::vector<whisper_token_data*> tokens;
 
     // the accumulated transcription in the current iteration (used to truncate the tokens array)
     int result_len;
@@ -3812,21 +3880,21 @@ static int whisper_wrap_segment(struct whisper_context & ctx, struct whisper_sta
 
     for (int i = 0; i < (int) segment.tokens.size(); i++) {
         const auto & token = segment.tokens[i];
-        if (token.id >= whisper_token_eot(&ctx)) {
+        if (token->id >= whisper_token_eot(&ctx)) {
             continue;
         }
 
-        const auto txt = whisper_token_to_str(&ctx, token.id);
+        const auto txt = whisper_token_to_str(&ctx, token->id);
         const int cur = strlen(txt);
 
         if (acc + cur > max_len && i > 0 && should_split_on_word(txt, split_on_word)) {
             state.result_all.back().text = std::move(text);
-            state.result_all.back().t1 = token.t0;
+            state.result_all.back().t1 = token->t0;
             state.result_all.back().tokens.resize(i);
             state.result_all.back().speaker_turn_next = false;
 
             state.result_all.push_back({});
-            state.result_all.back().t0 = token.t0;
+            state.result_all.back().t0 = token->t0;
             state.result_all.back().t1 = segment.t1;
 
             // add tokens [i, end] to the new segment
@@ -3929,7 +3997,7 @@ static void whisper_process_logits(
         logits[vocab.token_transcribe] = -INFINITY;
 
         if (params.logits_filter_callback) {
-            params.logits_filter_callback(&ctx, &state, tokens_cur.data(), tokens_cur.size(), logits.data(), params.logits_filter_callback_user_data);
+            params.logits_filter_callback(&ctx, &state, *tokens_cur.data(), tokens_cur.size(), logits.data(), params.logits_filter_callback_user_data);
         }
 
         // suppress non-speech tokens
@@ -3956,8 +4024,8 @@ static void whisper_process_logits(
         // timestamps have to appear in pairs, except directly before EOT; mask logits accordingly
         // https://github.com/openai/whisper/blob/0b1ba3d46ebf7fe6f953acfd8cad62a4f851b49f/whisper/decoding.py#L414-L424
         {
-            const bool last_was_timestamp        = tokens_cur.size() > 0 && tokens_cur.back().id >= vocab.token_beg;
-            const bool penultimate_was_timestamp = tokens_cur.size() < 2 || tokens_cur[tokens_cur.size() - 2].id >= vocab.token_beg;
+            const bool last_was_timestamp        = tokens_cur.size() > 0 && tokens_cur.back()->id >= vocab.token_beg;
+            const bool penultimate_was_timestamp = tokens_cur.size() < 2 || tokens_cur[tokens_cur.size() - 2]->id >= vocab.token_beg;
 
             //log("last_was_timestamp=%d penultimate_was_timestamp=%d\n", last_was_timestamp, penultimate_was_timestamp);
 
@@ -4088,12 +4156,12 @@ static void whisper_process_logits(
 #endif
 }
 
-static whisper_token_data whisper_sample_token(
+static whisper_token_data* whisper_sample_token(
             whisper_context & ctx,
               whisper_state & state,
       const whisper_decoder & decoder,
                        bool   best) {
-    whisper_token_data result = {
+    whisper_token_data* result = new whisper_token_data{
         0, 0, 0.0f, 0.0f, 0.0f, 0.0f, -1, -1, 0.0f,
     };
 
@@ -4116,33 +4184,33 @@ static whisper_token_data whisper_sample_token(
             sum_ts += probs[i];
             if (max_ts < probs[i]) {
                 max_ts = probs[i];
-                result.tid = i;
+                result->tid = i;
             }
         }
 
-        result.pt    = max_ts/(sum_ts + 1e-10);
-        result.ptsum = sum_ts;
+        result->pt    = max_ts/(sum_ts + 1e-10);
+        result->ptsum = sum_ts;
     }
 
     if (best) {
         for (int i = 0; i < n_logits; ++i) {
-            if (result.p < probs[i]) {
-                result.id   = i;
-                result.p    = probs[i];
-                result.plog = logprobs[i];
+            if (result->p < probs[i]) {
+                result->id   = i;
+                result->p    = probs[i];
+                result->plog = logprobs[i];
             }
         }
     } else {
         std::discrete_distribution<> dist(probs.begin(), probs.end());
 
-        result.id   = dist(state.rng);
-        result.p    = probs[result.id];
-        result.plog = logprobs[result.id];
+        result->id   = dist(state.rng);
+        result->p    = probs[result->id];
+        result->plog = logprobs[result->id];
     }
 
-    if (result.id >= vocab.token_beg) {
-        result.tid = result.id;
-        result.pt  = result.p;
+    if (result->id >= vocab.token_beg) {
+        result->tid = result->id;
+        result->pt  = result->p;
     }
 
     state.n_sample++;
@@ -4150,7 +4218,7 @@ static whisper_token_data whisper_sample_token(
     return result;
 }
 
-static std::vector<whisper_token_data> whisper_sample_token_topk(
+static std::vector<whisper_token_data*> whisper_sample_token_topk(
             whisper_context & ctx,
               whisper_state & state,
       const whisper_decoder & decoder,
@@ -4181,7 +4249,7 @@ static std::vector<whisper_token_data> whisper_sample_token_topk(
         });
     }
 
-    std::vector<whisper_token_data> result;
+    std::vector<whisper_token_data*> result;
     result.reserve(k);
 
     whisper_token tid = vocab.token_beg;
@@ -4212,11 +4280,11 @@ static std::vector<whisper_token_data> whisper_sample_token_topk(
     for (int i = 0; i < k; ++i) {
         const auto id = logits_id[i].second;
 
-        result.push_back({ id, tid, probs[id], logprobs[id], pt, ptsum, -1, -1, 0.0f, });
+        result.push_back(new whisper_token_data{ id, tid, probs[id], logprobs[id], pt, ptsum, -1, -1, 0.0f, });
 
-        if (result[i].id >= vocab.token_beg) {
-            result[i].tid = result[i].id;
-            result[i].pt  = result[i].p;
+        if (result[i]->id >= vocab.token_beg) {
+            result[i]->tid = result[i]->id;
+            result[i]->pt  = result[i]->p;
         }
     }
 
@@ -4236,7 +4304,7 @@ static void whisper_sequence_score(
     double result = 0.0f;
 
     for (int i = 0; i < sequence.result_len; ++i) {
-        result += sequence.tokens[i].plog;
+        result += sequence.tokens[i]->plog;
     }
 
     sequence.sum_logprobs = result;
@@ -4259,7 +4327,7 @@ static void whisper_sequence_score(
 
         std::map<whisper_token, int> token_counts;
         for (int i = std::max(0, sequence.result_len - n); i < sequence.result_len; ++i) {
-            token_counts[sequence.tokens[i].id]++;
+            token_counts[sequence.tokens[i]->id]++;
             cnt++;
         }
 
@@ -4730,7 +4798,7 @@ int whisper_full_with_state(
                                     decoder.sequence.tokens.push_back(whisper_sample_token(*ctx, *state, decoder, false));
                                 }
 
-                                decoder.sequence.sum_logprobs_all += decoder.sequence.tokens.back().plog;
+                                decoder.sequence.sum_logprobs_all += decoder.sequence.tokens.back()->plog;
                             } break;
                         case whisper_sampling_strategy::WHISPER_SAMPLING_BEAM_SEARCH:
                             {
@@ -4739,7 +4807,7 @@ int whisper_full_with_state(
                                 for (const auto & token : tokens_new) {
                                     beam_candidates.push_back({ j, decoder.seek_delta, decoder.has_ts, decoder.sequence });
                                     beam_candidates.back().sequence.tokens.push_back(token);
-                                    beam_candidates.back().sequence.sum_logprobs_all += token.plog;
+                                    beam_candidates.back().sequence.sum_logprobs_all += token->plog;
 
                                     //WHISPER_PRINT_DEBUG("%s: beam candidate: %s (%f, %f)\n", __func__, ctx->vocab.id_to_token.at(token.id).c_str(), token.plog, beam_candidates.back().sequence.sum_logprobs_all);
                                 }
@@ -4806,8 +4874,8 @@ int whisper_full_with_state(
                         const auto & token = decoder.sequence.tokens.back();
 
                         // timestamp token - update sliding window
-                        if (token.id > whisper_token_beg(ctx)) {
-                            const int seek_delta_new = 2*(token.id - whisper_token_beg(ctx));
+                        if (token->id > whisper_token_beg(ctx)) {
+                            const int seek_delta_new = 2*(token->id - whisper_token_beg(ctx));
 
                             // do not allow to go back in time
                             if (has_ts && seek_delta > seek_delta_new && result_len < i) {
@@ -4829,7 +4897,7 @@ int whisper_full_with_state(
 #endif
 
                         // end of segment
-                        if (token.id == whisper_token_eot(ctx) ||               // end of text token
+                        if (token->id == whisper_token_eot(ctx) ||               // end of text token
                            (params.max_tokens > 0 && i >= params.max_tokens) || // max tokens per segment reached
                            (has_ts && seek + seek_delta + 100 >= seek_end)      // end of audio reached
                            ) {
@@ -4897,7 +4965,7 @@ int whisper_full_with_state(
                     }
 
                     decoder.tokens_tmp.resize(1);
-                    decoder.tokens_tmp[0] = decoder.sequence.tokens.back().id;
+                    decoder.tokens_tmp[0] = decoder.sequence.tokens.back()->id;
 
                     //WHISPER_PRINT_DEBUG("%s: decoder %d: token %d, kv_self.n %d, seek_delta %d\n", __func__, j, decoder.tokens_tmp[0], decoder.kv_self.n, decoder.seek_delta);
 
@@ -4999,12 +5067,12 @@ int whisper_full_with_state(
             }
 
             for (int i = 0; i < result_len; ++i) {
-                prompt_past.push_back(tokens_cur[i].id);
+                prompt_past.push_back(tokens_cur[i]->id);
             }
 
             if (!tokens_cur.empty() && ctx->model.n_loaded > 0) {
                 int  i0 = 0;
-                auto t0 = seek + 2*(tokens_cur.front().tid - whisper_token_beg(ctx));
+                auto t0 = seek + 2*(tokens_cur.front()->tid - whisper_token_beg(ctx));
 
                 std::string text;
                 bool speaker_turn_next = false;
@@ -5014,17 +5082,17 @@ int whisper_full_with_state(
                     //        ctx->vocab.id_to_token[tokens_cur[i].id].c_str(), tokens_cur[i].p,
                     //        ctx->vocab.id_to_token[tokens_cur[i].tid].c_str(), tokens_cur[i].pt);
 
-                    if (params.print_special || tokens_cur[i].id < whisper_token_eot(ctx)) {
-                        text += whisper_token_to_str(ctx, tokens_cur[i].id);
+                    if (params.print_special || tokens_cur[i]->id < whisper_token_eot(ctx)) {
+                        text += whisper_token_to_str(ctx, tokens_cur[i]->id);
                     }
 
                     // [TDRZ] record if speaker turn was predicted after current segment
-                    if (params.tdrz_enable && tokens_cur[i].id == whisper_token_solm(ctx)) {
+                    if (params.tdrz_enable && tokens_cur[i]->id == whisper_token_solm(ctx)) {
                         speaker_turn_next = true;
                     }
 
-                    if (tokens_cur[i].id > whisper_token_beg(ctx) && !params.single_segment) {
-                        const auto t1 = seek + 2*(tokens_cur[i].tid - whisper_token_beg(ctx));
+                    if (tokens_cur[i]->id > whisper_token_beg(ctx) && !params.single_segment) {
+                        const auto t1 = seek + 2*(tokens_cur[i]->tid - whisper_token_beg(ctx));
 
                         if (!text.empty()) {
                             const auto tt0 = params.speed_up ? 2*t0 : t0;
@@ -5061,7 +5129,7 @@ int whisper_full_with_state(
                             }
                         }
                         text = "";
-                        while (i < (int) tokens_cur.size() && tokens_cur[i].id > whisper_token_beg(ctx)) {
+                        while (i < (int) tokens_cur.size() && tokens_cur[i]->id > whisper_token_beg(ctx)) {
                             i++;
                         }
                         i--;
@@ -5291,35 +5359,35 @@ int whisper_full_n_tokens(struct whisper_context * ctx, int i_segment) {
 }
 
 const char * whisper_full_get_token_text_from_state(struct whisper_context * ctx, struct whisper_state * state, int i_segment, int i_token) {
-    return ctx->vocab.id_to_token[state->result_all[i_segment].tokens[i_token].id].c_str();
+    return ctx->vocab.id_to_token[state->result_all[i_segment].tokens[i_token]->id].c_str();
 }
 
 const char* whisper_full_get_token_text(struct whisper_context * ctx, int i_segment, int i_token) {
-    return ctx->vocab.id_to_token[ctx->state->result_all[i_segment].tokens[i_token].id].c_str();
+    return ctx->vocab.id_to_token[ctx->state->result_all[i_segment].tokens[i_token]->id].c_str();
 }
 
 whisper_token whisper_full_get_token_id_from_state(struct whisper_state * state, int i_segment, int i_token) {
-    return state->result_all[i_segment].tokens[i_token].id;
+    return state->result_all[i_segment].tokens[i_token]->id;
 }
 
 whisper_token whisper_full_get_token_id(struct whisper_context * ctx, int i_segment, int i_token) {
-    return ctx->state->result_all[i_segment].tokens[i_token].id;
+    return ctx->state->result_all[i_segment].tokens[i_token]->id;
 }
 
-struct whisper_token_data whisper_full_get_token_data_from_state(struct whisper_state * state, int i_segment, int i_token) {
+struct whisper_token_data* whisper_full_get_token_data_from_state(struct whisper_state * state, int i_segment, int i_token) {
     return state->result_all[i_segment].tokens[i_token];
 }
 
-struct whisper_token_data whisper_full_get_token_data(struct whisper_context * ctx, int i_segment, int i_token) {
+struct whisper_token_data* whisper_full_get_token_data(struct whisper_context * ctx, int i_segment, int i_token) {
     return ctx->state->result_all[i_segment].tokens[i_token];
 }
 
 float whisper_full_get_token_p_from_state(struct whisper_state * state, int i_segment, int i_token) {
-    return state->result_all[i_segment].tokens[i_token].p;
+    return state->result_all[i_segment].tokens[i_token]->p;
 }
 
 float whisper_full_get_token_p(struct whisper_context * ctx, int i_segment, int i_token) {
-    return ctx->state->result_all[i_segment].tokens[i_token].p;
+    return ctx->state->result_all[i_segment].tokens[i_token]->p;
 }
 
 // =================================================================================================
@@ -5606,8 +5674,8 @@ static void whisper_exp_compute_token_level_timestamps(
     }
 
     if (n == 1) {
-        tokens[0].t0 = t0;
-        tokens[0].t1 = t1;
+        tokens[0]->t0 = t0;
+        tokens[0]->t1 = t1;
 
         return;
     }
@@ -5620,41 +5688,41 @@ static void whisper_exp_compute_token_level_timestamps(
         auto & token = tokens[j];
 
         if (j == 0) {
-            if (token.id == whisper_token_beg(&ctx)) {
-                tokens[j    ].t0 = t0;
-                tokens[j    ].t1 = t0;
-                tokens[j + 1].t0 = t0;
+            if (token->id == whisper_token_beg(&ctx)) {
+                tokens[j    ]->t0 = t0;
+                tokens[j    ]->t1 = t0;
+                tokens[j + 1]->t0 = t0;
 
                 t_beg    = t0;
                 t_last   = t0;
                 tid_last = whisper_token_beg(&ctx);
             } else {
-                tokens[j    ].t0 = t_last;
+                tokens[j    ]->t0 = t_last;
             }
         }
 
-        const int64_t tt = t_beg + 2*(token.tid - whisper_token_beg(&ctx));
+        const int64_t tt = t_beg + 2*(token->tid - whisper_token_beg(&ctx));
 
-        tokens[j].id    = token.id;
-        tokens[j].tid   = token.tid;
-        tokens[j].p     = token.p;
-        tokens[j].pt    = token.pt;
-        tokens[j].ptsum = token.ptsum;
+        tokens[j]->id    = token->id;
+        tokens[j]->tid   = token->tid;
+        tokens[j]->p     = token->p;
+        tokens[j]->pt    = token->pt;
+        tokens[j]->ptsum = token->ptsum;
 
-        tokens[j].vlen = voice_length(whisper_token_to_str(&ctx, token.id));
+        tokens[j]->vlen = voice_length(whisper_token_to_str(&ctx, token->id));
 
-        if (token.pt > thold_pt && token.ptsum > thold_ptsum && token.tid > tid_last && tt <= t1) {
+        if (token->pt > thold_pt && token->ptsum > thold_ptsum && token->tid > tid_last && tt <= t1) {
             if (j > 0) {
-                tokens[j - 1].t1 = tt;
+                tokens[j - 1]->t1 = tt;
             }
-            tokens[j].t0 = tt;
-            tid_last = token.tid;
+            tokens[j]->t0 = tt;
+            tid_last = token->tid;
         }
     }
 
-    tokens[n - 2].t1 = t1;
-    tokens[n - 1].t0 = t1;
-    tokens[n - 1].t1 = t1;
+    tokens[n - 2]->t1 = t1;
+    tokens[n - 1]->t0 = t1;
+    tokens[n - 1]->t1 = t1;
 
     t_last = t1;
 
@@ -5665,7 +5733,7 @@ static void whisper_exp_compute_token_level_timestamps(
         int p1 = 0;
 
         while (true) {
-            while (p1 < n && tokens[p1].t1 < 0) {
+            while (p1 < n && tokens[p1]->t1 < 0) {
                 p1++;
             }
 
@@ -5678,19 +5746,19 @@ static void whisper_exp_compute_token_level_timestamps(
             if (p1 > p0) {
                 double psum = 0.0;
                 for (int j = p0; j <= p1; j++) {
-                    psum += tokens[j].vlen;
+                    psum += tokens[j]->vlen;
                 }
 
                 //printf("analyzing %d - %d, psum = %f\n", p0, p1, psum);
 
-                const double dt = tokens[p1].t1 - tokens[p0].t0;
+                const double dt = tokens[p1]->t1 - tokens[p0]->t0;
 
                 // split the time proportionally to the voice length
                 for (int j = p0 + 1; j <= p1; j++) {
-                    const double ct = tokens[j - 1].t0 + dt*tokens[j - 1].vlen/psum;
+                    const double ct = tokens[j - 1]->t0 + dt*tokens[j - 1]->vlen/psum;
 
-                    tokens[j - 1].t1 = ct;
-                    tokens[j    ].t0 = ct;
+                    tokens[j - 1]->t1 = ct;
+                    tokens[j    ]->t0 = ct;
                 }
             }
 
@@ -5704,14 +5772,14 @@ static void whisper_exp_compute_token_level_timestamps(
 
     // fix up (just in case)
     for (int j = 0; j < n - 1; j++) {
-        if (tokens[j].t1 < 0) {
-            tokens[j + 1].t0 = tokens[j].t1;
+        if (tokens[j]->t1 < 0) {
+            tokens[j + 1]->t0 = tokens[j]->t1;
         }
 
         if (j > 0) {
-            if (tokens[j - 1].t1 > tokens[j].t0) {
-                tokens[j].t0 = tokens[j - 1].t1;
-                tokens[j].t1 = std::max(tokens[j].t0, tokens[j].t1);
+            if (tokens[j - 1]->t1 > tokens[j]->t0) {
+                tokens[j]->t0 = tokens[j - 1]->t1;
+                tokens[j]->t1 = std::max(tokens[j]->t0, tokens[j]->t1);
             }
         }
     }
@@ -5722,12 +5790,12 @@ static void whisper_exp_compute_token_level_timestamps(
         const int hw = WHISPER_SAMPLE_RATE/8;
 
         for (int j = 0; j < n; j++) {
-            if (tokens[j].id >= whisper_token_eot(&ctx)) {
+            if (tokens[j]->id >= whisper_token_eot(&ctx)) {
                 continue;
             }
 
-            int s0 = timestamp_to_sample(tokens[j].t0, n_samples);
-            int s1 = timestamp_to_sample(tokens[j].t1, n_samples);
+            int s0 = timestamp_to_sample(tokens[j]->t0, n_samples);
+            int s1 = timestamp_to_sample(tokens[j]->t1, n_samples);
 
             const int ss0 = std::max(s0 - hw, 0);
             const int ss1 = std::min(s1 + hw, n_samples);
@@ -5748,9 +5816,9 @@ static void whisper_exp_compute_token_level_timestamps(
                     while (k > 0 && state.energy[k] > thold) {
                         k--;
                     }
-                    tokens[j].t0 = sample_to_timestamp(k);
-                    if (tokens[j].t0 < tokens[j - 1].t1) {
-                        tokens[j].t0 = tokens[j - 1].t1;
+                    tokens[j]->t0 = sample_to_timestamp(k);
+                    if (tokens[j]->t0 < tokens[j - 1]->t1) {
+                        tokens[j]->t0 = tokens[j - 1]->t1;
                     } else {
                         s0 = k;
                     }
@@ -5759,7 +5827,7 @@ static void whisper_exp_compute_token_level_timestamps(
                         k++;
                     }
                     s0 = k;
-                    tokens[j].t0 = sample_to_timestamp(k);
+                    tokens[j]->t0 = sample_to_timestamp(k);
                 }
             }
 
@@ -5769,9 +5837,9 @@ static void whisper_exp_compute_token_level_timestamps(
                     while (k < n_samples - 1 && state.energy[k] > thold) {
                         k++;
                     }
-                    tokens[j].t1 = sample_to_timestamp(k);
-                    if (j < ns - 1 && tokens[j].t1 > tokens[j + 1].t0) {
-                        tokens[j].t1 = tokens[j + 1].t0;
+                    tokens[j]->t1 = sample_to_timestamp(k);
+                    if (j < ns - 1 && tokens[j]->t1 > tokens[j + 1]->t0) {
+                        tokens[j]->t1 = tokens[j + 1]->t0;
                     } else {
                         s1 = k;
                     }
@@ -5780,7 +5848,7 @@ static void whisper_exp_compute_token_level_timestamps(
                         k--;
                     }
                     s1 = k;
-                    tokens[j].t1 = sample_to_timestamp(k);
+                    tokens[j]->t1 = sample_to_timestamp(k);
                 }
             }
         }

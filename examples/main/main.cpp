@@ -672,7 +672,7 @@ bool output_wts(struct whisper_context * ctx, const char * fname, const char * f
 
         const int n = whisper_full_n_tokens(ctx, i);
 
-        std::vector<whisper_token_data> tokens(n);
+        std::vector<whisper_token_data*> tokens(n);
         for (int j = 0; j < n; ++j) {
             tokens[j] = whisper_full_get_token_data(ctx, i, j);
         }
@@ -694,7 +694,7 @@ bool output_wts(struct whisper_context * ctx, const char * fname, const char * f
         for (int j = 0; j < n; ++j) {
             const auto & token = tokens[j];
 
-            if (tokens[j].id >= whisper_token_eot(ctx)) {
+            if (whisper_token_data__get_id(tokens[j]) >= whisper_token_eot(ctx)) {
                 continue;
             }
 
@@ -716,11 +716,11 @@ bool output_wts(struct whisper_context * ctx, const char * fname, const char * f
                 for (int k = 0; k < n; ++k) {
                     const auto & token2 = tokens[k];
 
-                    if (tokens[k].id >= whisper_token_eot(ctx)) {
+                    if (whisper_token_data__get_id(tokens[k]) >= whisper_token_eot(ctx)) {
                         continue;
                     }
 
-                    const std::string txt = whisper_token_to_str(ctx, token2.id);
+                    const std::string txt = whisper_token_to_str(ctx, whisper_token_data__get_id(token2));
 
                     txt_bg += txt;
 
@@ -751,10 +751,10 @@ bool output_wts(struct whisper_context * ctx, const char * fname, const char * f
             }
 
             // foreground text
-            fout << ",drawtext=fontfile='" << font << "':fontsize=24:fontcolor=lightgreen:x=(w-text_w)/2+8:y=h/2:text='" << txt_fg << "':enable='between(t," << token.t0/100.0 << "," << token.t1/100.0 << ")'";
+            fout << ",drawtext=fontfile='" << font << "':fontsize=24:fontcolor=lightgreen:x=(w-text_w)/2+8:y=h/2:text='" << txt_fg << "':enable='between(t," << whisper_token_data__get_t0(token)/100.0 << "," << whisper_token_data__get_t1(token)/100.0 << ")'";
 
             // underline
-            fout << ",drawtext=fontfile='" << font << "':fontsize=24:fontcolor=lightgreen:x=(w-text_w)/2+8:y=h/2+16:text='" << txt_ul << "':enable='between(t," << token.t0/100.0 << "," << token.t1/100.0 << ")'";
+            fout << ",drawtext=fontfile='" << font << "':fontsize=24:fontcolor=lightgreen:x=(w-text_w)/2+8:y=h/2+16:text='" << txt_ul << "':enable='between(t," << whisper_token_data__get_t0(token)/100.0 << "," << whisper_token_data__get_t1(token)/100.0 << ")'";
         }
     }
 

@@ -72,7 +72,6 @@ Java_com_whispercppdemo_whisper_WhisperLib_00024Companion_initContextFromInputSt
     UNUSED(thiz);
 
     struct whisper_context *context = NULL;
-    struct whisper_model_loader loader = {};
     struct input_stream_context inp_ctx = {};
 
     inp_ctx.offset = 0;
@@ -84,10 +83,7 @@ Java_com_whispercppdemo_whisper_WhisperLib_00024Companion_initContextFromInputSt
     inp_ctx.mid_available = (*env)->GetMethodID(env, cls, "available", "()I");
     inp_ctx.mid_read = (*env)->GetMethodID(env, cls, "read", "([BII)I");
 
-    loader.context = &inp_ctx;
-    loader.read = inputStreamRead;
-    loader.eof = inputStreamEof;
-    loader.close = inputStreamClose;
+    struct whisper_model_loader* loader = whisper_model_loader__new(&inp_ctx, inputStreamRead, inputStreamEof, inputStreamClose);
 
     loader.eof(loader.context);
 
@@ -120,14 +116,14 @@ static struct whisper_context *whisper_init_from_asset(
         return NULL;
     }
 
-    whisper_model_loader loader = {
+    whisper_model_loader* loader = whisper_model_loader__new(
             .context = asset,
             .read = &asset_read,
             .eof = &asset_is_eof,
             .close = &asset_close
-    };
+    );
 
-    return whisper_init(&loader);
+    return whisper_init(loader);
 }
 
 JNIEXPORT jlong JNICALL
