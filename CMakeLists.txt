@@ -471,6 +471,12 @@ add_library(${TARGET}
     whisper.cpp
     )
 
+# Set the version numbers
+set_target_properties(whisper PROPERTIES
+    VERSION 1.0.0
+    SOVERSION 1
+)
+
 include(DefaultTargetOptions)
 
 target_include_directories(${TARGET} PUBLIC
